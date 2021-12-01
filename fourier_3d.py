@@ -4,7 +4,9 @@ This file is the Fourier Neural Operator for 3D problem such as the Navier-Stoke
 which takes the 2D spatial + 1D temporal equation directly as a 3D problem
 """
 
-
+from glob import glob
+from os.path import join
+from tqdm import tqdm
 import torch
 import numpy as np
 import torch.nn as nn
@@ -162,11 +164,11 @@ class FNO3d(nn.Module):
 # configs
 ################################################################
 
-TRAIN_PATH = 'data/ns_data_V100_N1000_T50_1.mat'
-TEST_PATH = 'data/ns_data_V100_N1000_T50_2.mat'
+DATA_PATH = 'data/nu=1e-4'
+# TEST_PATH = 'data/ns_data_V100_N1000_T50_2.mat'
 
-ntrain = 1000
-ntest = 200
+ntrain = 10 # number of training batches (each with 32 samples), out of 61 total batches
+ntest = 10
 
 modes = 8
 width = 20
@@ -193,8 +195,8 @@ runtime = np.zeros(2, )
 t1 = default_timer()
 
 
-sub = 1
-S = 64 // sub
+sub = 2
+S = 128 // sub
 T_in = 10
 T = 40
 
@@ -202,29 +204,52 @@ T = 40
 # load data
 ################################################################
 
-reader = MatReader(TRAIN_PATH)
-train_a = reader.read_field('u')[:ntrain,::sub,::sub,:T_in]
-train_u = reader.read_field('u')[:ntrain,::sub,::sub,T_in:T+T_in]
+''' Modified data loading '''
+def MultiReader(files):
+    '''Load data from multiple files'''
+    a = []
+    u = []
+    for f in tqdm(files):
+        reader = MatReader(f)
+        a.append(reader.read_field('u')[:,::sub,::sub,:T_in])
+        u.append(reader.read_field('u')[:,::sub,::sub,T_in:T+T_in])
+    a = torch.cat(a, dim=0)
+    u = torch.cat(u, dim=0)
+    return a, u
 
-reader = MatReader(TEST_PATH)
-test_a = reader.read_field('u')[-ntest:,::sub,::sub,:T_in]
-test_u = reader.read_field('u')[-ntest:,::sub,::sub,T_in:T+T_in]
+files       = sorted(glob(join(DATA_PATH,'*.mat')))
+train_files = files[:ntrain]
+test_files  = files[ntrain:ntrain+ntest]
+
+train_a, train_u = MultiReader(train_files)
+test_a,  test_u  = MultiReader(test_files)
+
+'''Original data loading'''
+# reader = MatReader(TRAIN_PATH)
+# train_a = reader.read_field('u')[:ntrain,::sub,::sub,:T_in]
+# train_u = reader.read_field('u')[:ntrain,::sub,::sub,T_in:T+T_in]
+# 
+# reader = MatReader(TEST_PATH)
+# test_a = reader.read_field('u')[-ntest:,::sub,::sub,:T_in]
+# test_u = reader.read_field('u')[-ntest:,::sub,::sub,T_in:T+T_in]
 
 print(train_u.shape)
 print(test_u.shape)
 assert (S == train_u.shape[-2])
 assert (T == train_u.shape[-1])
 
-
+print()
+print('pre-process inputs')
 a_normalizer = UnitGaussianNormalizer(train_a)
 train_a = a_normalizer.encode(train_a)
 test_a = a_normalizer.encode(test_a)
 
+print('pre-process outputs')
 y_normalizer = UnitGaussianNormalizer(train_u)
 train_u = y_normalizer.encode(train_u)
 
-train_a = train_a.reshape(ntrain,S,S,1,T_in).repeat([1,1,1,T,1])
-test_a = test_a.reshape(ntest,S,S,1,T_in).repeat([1,1,1,T,1])
+train_a = train_a.reshape(32*ntrain,S,S,1,T_in).repeat([1,1,1,T,1])
+test_a = test_a.reshape(32*ntest,S,S,1,T_in).repeat([1,1,1,T,1])
 
 train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(train_a, train_u), batch_size=batch_size, shuffle=True)
 test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(test_a, test_u), batch_size=batch_size, shuffle=False)
@@ -247,14 +272,14 @@ scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=scheduler_step,
 
 myloss = LpLoss(size_average=False)
 y_normalizer.cuda()
-for ep in range(epochs):
+for ep in tqdm(range(epochs)):
     model.train()
     t1 = default_timer()
     train_mse = 0
     train_l2 = 0
     for x, y in train_loader:
         x, y = x.cuda(), y.cuda()
-
+        
         optimizer.zero_grad()
         out = model(x).view(batch_size, S, S, T)
 
